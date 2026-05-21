@@ -1,0 +1,143 @@
+name: Build and Deploy to EC2 (via GHCR)
+
+on:
+  push:
+    branches:
+      - main
+      - PhatDev # Thêm branch phát triển của bạn để kiểm tra nếu cần
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: kickify-api
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Downcase repository name
+        run: |
+          echo "GHCR_REPO=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.GHCR_REPO }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ github.run_number }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Kickify.Api/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to AWS EC2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Downcase repository name
+        run: |
+          echo "GHCR_REPO=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT || 22 }}
+          script: |
+            set -e
+            
+            PROJECT_DIR="${{ secrets.PROJECT_PATH }}"
+            cd $PROJECT_DIR
+            
+            echo "1. Fetching latest code on EC2..."
+            git fetch origin
+            git checkout ${{ github.ref_name }}
+            git pull origin ${{ github.ref_name }}
+            
+            echo "2. Authenticating with GitHub Container Registry..."
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+            
+            BUILD_NUMBER=${{ github.run_number }}
+            FULL_IMAGE_NAME="${{ env.REGISTRY }}/${{ env.GHCR_REPO }}/${{ env.IMAGE_NAME }}"
+            
+            echo "3. Pulling Docker image: $FULL_IMAGE_NAME:$BUILD_NUMBER..."
+            docker pull $FULL_IMAGE_NAME:$BUILD_NUMBER
+            
+            echo "4. Tagging Docker image locally..."
+            docker tag $FULL_IMAGE_NAME:$BUILD_NUMBER ${{ env.IMAGE_NAME }}:$BUILD_NUMBER
+            docker tag $FULL_IMAGE_NAME:$BUILD_NUMBER ${{ env.IMAGE_NAME }}:latest
+            
+            echo "5. Stopping old containers..."
+            export BUILD_NUMBER=$BUILD_NUMBER
+            docker-compose down || true
+            docker stop ${{ env.IMAGE_NAME }} || true
+            docker rm ${{ env.IMAGE_NAME }} || true
+            
+            echo "6. Starting new containers with Docker Compose..."
+            docker-compose up -d
+            
+            echo "7. Updating Nginx upstream configuration..."
+            API_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${{ env.IMAGE_NAME }})
+            if [ -z "$API_IP" ]; then
+                echo "ERROR: Could not resolve container IP for ${{ env.IMAGE_NAME }}"
+                exit 1
+            fi
+            
+            sudo tee /etc/nginx/conf.d/upstream-kickify.conf > /dev/null <<EOF
+            upstream kickify_api {
+                server ${API_IP}:8080 max_fails=2 fail_timeout=5s;
+                keepalive 64;
+            }
+            EOF
+            
+            sudo nginx -t
+            sudo systemctl reload nginx
+            echo "Nginx upstream successfully reloaded to point to ${API_IP}:8080"
+            
+            echo "8. Verifying local deployment..."
+            sleep 10
+            if docker ps | grep -q ${{ env.IMAGE_NAME }}; then
+                echo "Container is running successfully!"
+            else
+                echo "ERROR: Container failed to stay running."
+                docker logs ${{ env.IMAGE_NAME }} --tail 50
+                exit 1
+            fi
+            
+            echo "9. Performing health check..."
+            curl -f https://api.kickify.site/health || echo "Warning: Health endpoint not reachable directly from host"
+            
+            echo "10. Cleaning up old images and logs..."
+            # Logout registry
+            docker logout ${{ env.REGISTRY }}
+            
+            # Remove old tags of the image, keeping the last 3 builds
+            docker images ${{ env.IMAGE_NAME }} --format "{{.Tag}}" | grep -v latest | tail -n +4 | xargs -I {} docker rmi ${{ env.IMAGE_NAME }}:{} 2>/dev/null || true
+            # Clean unused build cache/dangling images
+            docker image prune -f
+            
+            echo "=== DEPLOYMENT COMPLETED SUCCESSFULLY ==="
