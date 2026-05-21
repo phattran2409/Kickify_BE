@@ -108,6 +108,7 @@ jobs:
                 exit 1
             fi
             
+            sudo mkdir -p /etc/nginx/conf.d
             sudo tee /etc/nginx/conf.d/upstream-kickify.conf > /dev/null <<EOF
             upstream kickify_api {
                 server ${API_IP}:8080 max_fails=2 fail_timeout=5s;
