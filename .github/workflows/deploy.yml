@@ -94,12 +94,12 @@ jobs:
             
             echo "5. Stopping old containers..."
             export BUILD_NUMBER=$BUILD_NUMBER
-            docker-compose down || true
+            docker-compose -f docker-compose.yml down || true
             docker stop ${{ env.IMAGE_NAME }} || true
             docker rm ${{ env.IMAGE_NAME }} || true
             
             echo "6. Starting new containers with Docker Compose..."
-            docker-compose up -d
+            docker-compose -f docker-compose.yml up -d
             
             echo "7. Updating Nginx upstream configuration..."
             API_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${{ env.IMAGE_NAME }})
