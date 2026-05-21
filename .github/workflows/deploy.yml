@@ -69,6 +69,7 @@ jobs:
           port: ${{ secrets.EC2_PORT || 22 }}
           script: |
             set -e
+            export PATH=$PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin
             
             PROJECT_DIR="${{ secrets.PROJECT_PATH }}"
             cd $PROJECT_DIR
