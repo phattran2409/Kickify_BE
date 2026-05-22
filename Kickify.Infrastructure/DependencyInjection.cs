@@ -86,46 +86,50 @@ namespace Kickify.Infrastructure
 
         private static IServiceCollection AddDatabase(this IServiceCollection services, IConfiguration configuration)
         {
-            services.AddDbContext<ApplicationDbContext>(options =>
+            var connectionString = configuration.GetConnectionString("Database");
+            bool isAuthIAM_AWS = !connectionString.Contains("Password=", StringComparison.OrdinalIgnoreCase);
+
+            if (isAuthIAM_AWS)
             {
-                var connectionString = configuration.GetConnectionString("Database");
-                bool isAuthIAM_AWS = !connectionString.Contains("Password=", StringComparison.OrdinalIgnoreCase);
-                if (isAuthIAM_AWS)
-                {
-                    var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
-                    dataSourceBuilder.UsePeriodicPasswordProvider(
-                        async (constringBuilder , CancellationToken) =>
-                        {
-                            var regionName = configuration["AWS:Region"] ?? "ap-southeast-1";
-                            var region = RegionEndpoint.GetBySystemName(regionName);
-                            string token =  RDSAuthTokenGenerator.GenerateAuthToken(
-                                        RegionEndpoint.APSoutheast1,
-                                        constringBuilder.Host,
-                                        constringBuilder.Port,
-                                        constringBuilder.Username
-                                );
-                            return token;
-                        },
-                        TimeSpan.FromMinutes(10), // Tự động làm mới mật khẩu mỗi 10 phút
-                        TimeSpan.FromSeconds(10)
-                    );
-                    var dataSource = dataSourceBuilder.Build();
-                    // 3. Đăng ký DataSource vào DI Container
-                    services.AddSingleton(dataSource);
-                    // 4. Cấu hình DbContext sử dụng DataSource động
-                    services.AddDbContext<ApplicationDbContext>(options =>
+                var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
+                dataSourceBuilder.UsePeriodicPasswordProvider(
+                    async (constringBuilder , CancellationToken) =>
                     {
-                        options.UseNpgsql(dataSource, npgsqlOptions =>
-                        {
-                            npgsqlOptions.EnableRetryOnFailure(
-                                maxRetryCount: 5,
-                                maxRetryDelay: TimeSpan.FromSeconds(10),
-                                errorCodesToAdd: null);
-                            npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
-                        });
+                        var regionName = configuration["AWS:Region"] ?? "ap-southeast-1";
+                        var region = RegionEndpoint.GetBySystemName(regionName);
+                        string token =  RDSAuthTokenGenerator.GenerateAuthToken(
+                                    RegionEndpoint.APSoutheast1,
+                                    constringBuilder.Host,
+                                    constringBuilder.Port,
+                                    constringBuilder.Username
+                            );
+                        return token;
+                    },
+                    TimeSpan.FromMinutes(10), // Tự động làm mới mật khẩu mỗi 10 phút
+                    TimeSpan.FromSeconds(10)
+                );
+                var dataSource = dataSourceBuilder.Build();
+                
+                // 3. Đăng ký DataSource vào DI Container
+                services.AddSingleton(dataSource);
+                
+                // 4. Cấu hình DbContext sử dụng DataSource động
+                services.AddDbContext<ApplicationDbContext>(options =>
+                {
+                    options.UseNpgsql(dataSource, npgsqlOptions =>
+                    {
+                        npgsqlOptions.EnableRetryOnFailure(
+                            maxRetryCount: 5,
+                            maxRetryDelay: TimeSpan.FromSeconds(10),
+                            errorCodesToAdd: null);
+                        npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
                     });
-                }
-                else
+                });
+            }
+            else
+            {
+                // 5. Kết nối thông thường (Supabase / Local)
+                services.AddDbContext<ApplicationDbContext>(options =>
                 {
                     options.UseNpgsql(connectionString, npgsqlOptions =>
                     {
@@ -136,9 +140,9 @@ namespace Kickify.Infrastructure
 
                         npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
                     });
-                }
-               
-            });
+                });
+            }
+
             services.AddScoped<IApplicationDbContext>(provider =>
                 provider.GetRequiredService<ApplicationDbContext>());
 
