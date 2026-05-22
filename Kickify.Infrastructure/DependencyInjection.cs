@@ -29,6 +29,7 @@ using Kickify.Infrastructure.ChatConnection;
 using VNPAY.Extensions;
 using Hangfire;
 using Hangfire.PostgreSql;
+using Amazon;
 using Amazon.RDS.Util;
 
 namespace Kickify.Infrastructure
