@@ -1,4 +1,4 @@
-using BrewView.Infrastructure.Authentication;
+﻿using BrewView.Infrastructure.Authentication;
 using FirebaseAdmin;
 using Google.Apis.Auth.OAuth2;
 using Kickify.Application.Abstractions.Authentication;
@@ -29,6 +29,7 @@ using Kickify.Infrastructure.ChatConnection;
 using VNPAY.Extensions;
 using Hangfire;
 using Hangfire.PostgreSql;
+using Amazon.RDS.Util;
 
 namespace Kickify.Infrastructure
 {
@@ -87,17 +88,53 @@ namespace Kickify.Infrastructure
             services.AddDbContext<ApplicationDbContext>(options =>
             {
                 var connectionString = configuration.GetConnectionString("Database");
-                options.UseNpgsql(connectionString, npgsqlOptions =>
+                bool isAuthIAM_AWS = !connectionString.Contains("Password=", StringComparison.OrdinalIgnoreCase);
+                if (isAuthIAM_AWS)
                 {
-                    npgsqlOptions.EnableRetryOnFailure(
-                        maxRetryCount: 5,
-                        maxRetryDelay: TimeSpan.FromSeconds(10),
-                        errorCodesToAdd: null);
+                    var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
+                    dataSourceBuilder.UsePeriodicPasswordProvider(
+                        async (constringBuilder , CancellationToken) =>
+                        {
+                            string token = await RDSAuthTokenGenerator.GenerateAuthTokenAsync(
+                                    constringBuilder.Host,
+                                    constringBuilder.Port,
+                                    constringBuilder.Username
+                                );
+                            return token;
+                        },
+                        TimeSpan.FromMinutes(10), // Tự động làm mới mật khẩu mỗi 10 phút
+                        TimeSpan.FromSeconds(10)
+                    );
+                    var dataSource = dataSourceBuilder.Build();
+                    // 3. Đăng ký DataSource vào DI Container
+                    services.AddSingleton(dataSource);
+                    // 4. Cấu hình DbContext sử dụng DataSource động
+                    services.AddDbContext<ApplicationDbContext>(options =>
+                    {
+                        options.UseNpgsql(dataSource, npgsqlOptions =>
+                        {
+                            npgsqlOptions.EnableRetryOnFailure(
+                                maxRetryCount: 5,
+                                maxRetryDelay: TimeSpan.FromSeconds(10),
+                                errorCodesToAdd: null);
+                            npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
+                        });
+                    });
+                }
+                else
+                {
+                    options.UseNpgsql(connectionString, npgsqlOptions =>
+                    {
+                        npgsqlOptions.EnableRetryOnFailure(
+                            maxRetryCount: 5,
+                            maxRetryDelay: TimeSpan.FromSeconds(10),
+                            errorCodesToAdd: null);
 
-                    npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
-                });
+                        npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
+                    });
+                }
+               
             });
-
             services.AddScoped<IApplicationDbContext>(provider =>
                 provider.GetRequiredService<ApplicationDbContext>());
 
