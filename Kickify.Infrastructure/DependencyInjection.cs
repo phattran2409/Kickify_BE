@@ -1,4 +1,4 @@
-﻿using BrewView.Infrastructure.Authentication;
+using BrewView.Infrastructure.Authentication;
 using FirebaseAdmin;
 using Google.Apis.Auth.OAuth2;
 using Kickify.Application.Abstractions.Authentication;
@@ -96,10 +96,13 @@ namespace Kickify.Infrastructure
                     dataSourceBuilder.UsePeriodicPasswordProvider(
                         async (constringBuilder , CancellationToken) =>
                         {
-                            string token = await RDSAuthTokenGenerator.GenerateAuthTokenAsync(
-                                    constringBuilder.Host,
-                                    constringBuilder.Port,
-                                    constringBuilder.Username
+                            var regionName = configuration["AWS:Region"] ?? "ap-southeast-1";
+                            var region = RegionEndpoint.GetBySystemName(regionName);
+                            string token =  RDSAuthTokenGenerator.GenerateAuthToken(
+                                        RegionEndpoint.APSoutheast1,
+                                        constringBuilder.Host,
+                                        constringBuilder.Port,
+                                        constringBuilder.Username
                                 );
                             return token;
                         },
