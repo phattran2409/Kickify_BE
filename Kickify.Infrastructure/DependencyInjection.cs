@@ -31,6 +31,7 @@ using Hangfire;
 using Hangfire.PostgreSql;
 using Amazon;
 using Amazon.RDS.Util;
+using Npgsql;
 
 namespace Kickify.Infrastructure
 {
@@ -87,62 +88,60 @@ namespace Kickify.Infrastructure
         private static IServiceCollection AddDatabase(this IServiceCollection services, IConfiguration configuration)
         {
             var connectionString = configuration.GetConnectionString("Database");
-            bool isAuthIAM_AWS = !connectionString.Contains("Password=", StringComparison.OrdinalIgnoreCase);
+            // bool isAuthIAM_AWS = !connectionString.Contains("Password=", StringComparison.OrdinalIgnoreCase);
 
-            if (isAuthIAM_AWS)
-            {
-                var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
-                dataSourceBuilder.UsePeriodicPasswordProvider(
-                    async (constringBuilder , CancellationToken) =>
-                    {
-                        var regionName = configuration["AWS:Region"] ?? "ap-southeast-1";
-                        var region = RegionEndpoint.GetBySystemName(regionName);
-                        string token =  RDSAuthTokenGenerator.GenerateAuthToken(
-                                    RegionEndpoint.APSoutheast1,
-                                    constringBuilder.Host,
-                                    constringBuilder.Port,
-                                    constringBuilder.Username
-                            );
-                        return token;
-                    },
-                    TimeSpan.FromMinutes(10), // Tự động làm mới mật khẩu mỗi 10 phút
-                    TimeSpan.FromSeconds(10)
-                );
-                var dataSource = dataSourceBuilder.Build();
+            // if (isAuthIAM_AWS)
+            // {
+            //     var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
+            //     dataSourceBuilder.UsePeriodicPasswordProvider(
+            //         async (constringBuilder , CancellationToken) =>
+            //         {
+            //             var regionName = configuration["AWS:Region"] ?? "ap-southeast-1";
+            //             var region = RegionEndpoint.GetBySystemName(regionName);
+            //             string token =  RDSAuthTokenGenerator.GenerateAuthToken(
+            //                         RegionEndpoint.APSoutheast1,
+            //                         constringBuilder.Host,
+            //                         constringBuilder.Port,
+            //                         constringBuilder.Username
+            //                 );
+            //             return token;
+            //         },
+            //         TimeSpan.FromMinutes(10), // Tự động làm mới mật khẩu mỗi 10 phút
+            //         TimeSpan.FromSeconds(10)
+            //     );
+            //     var dataSource = dataSourceBuilder.Build();
                 
-                // 3. Đăng ký DataSource vào DI Container
-                services.AddSingleton(dataSource);
+            //     // 3. Đăng ký DataSource vào DI Container
+            //     services.AddSingleton(dataSource);
                 
-                // 4. Cấu hình DbContext sử dụng DataSource động
-                services.AddDbContext<ApplicationDbContext>(options =>
-                {
-                    options.UseNpgsql(dataSource, npgsqlOptions =>
-                    {
-                        npgsqlOptions.EnableRetryOnFailure(
-                            maxRetryCount: 5,
-                            maxRetryDelay: TimeSpan.FromSeconds(10),
-                            errorCodesToAdd: null);
-                        npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
-                    });
-                });
-            }
-            else
+            //     // 4. Cấu hình DbContext sử dụng DataSource động
+            //     services.AddDbContext<ApplicationDbContext>(options =>
+            //     {
+            //         options.UseNpgsql(dataSource, npgsqlOptions =>
+            //         {
+            //             npgsqlOptions.EnableRetryOnFailure(
+            //                 maxRetryCount: 5,
+            //                 maxRetryDelay: TimeSpan.FromSeconds(10),
+            //                 errorCodesToAdd: null);
+            //             npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
+            //         });
+            //     });
+            // }
+            // else
+            // {
+            // 5. Kết nối thông thường (Supabase / Local)
+            services.AddDbContext<ApplicationDbContext>(options =>
             {
-                // 5. Kết nối thông thường (Supabase / Local)
-                services.AddDbContext<ApplicationDbContext>(options =>
+                options.UseNpgsql(connectionString, npgsqlOptions =>
                 {
-                    options.UseNpgsql(connectionString, npgsqlOptions =>
-                    {
-                        npgsqlOptions.EnableRetryOnFailure(
-                            maxRetryCount: 5,
-                            maxRetryDelay: TimeSpan.FromSeconds(10),
-                            errorCodesToAdd: null);
+                    npgsqlOptions.EnableRetryOnFailure(
+                        maxRetryCount: 5,
+                        maxRetryDelay: TimeSpan.FromSeconds(10),
+                        errorCodesToAdd: null);
 
-                        npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
-                    });
+                    npgsqlOptions.MigrationsHistoryTable("__EFMigrationsHistory", Schemas.System);
                 });
-            }
-
+            });
             services.AddScoped<IApplicationDbContext>(provider =>
                 provider.GetRequiredService<ApplicationDbContext>());
 
@@ -297,18 +296,39 @@ namespace Kickify.Infrastructure
         {
             var connectionString = configuration.GetConnectionString("Database");
 
-            services.AddHangfire(config => config
-                .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
-                .UseSimpleAssemblyNameTypeSerializer()
-                .UseRecommendedSerializerSettings()
-                .UsePostgreSqlStorage(options =>
-                    options.UseNpgsqlConnection(connectionString),
+            services.AddHangfire((sp, config) =>
+            {
+                config
+                    .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+                    .UseSimpleAssemblyNameTypeSerializer()
+                    .UseRecommendedSerializerSettings();
+
+                var dataSource = sp.GetService<NpgsqlDataSource>();
+                if (dataSource != null)
+                {
+                    config.UsePostgreSqlStorage(options =>
+                    {
+                        options.UseConnectionFactory(new HangfireNpgsqlDataSourceConnectionFactory(dataSource));
+                    },
                     new PostgreSqlStorageOptions
                     {
                         PrepareSchemaIfNecessary = true,
                         SchemaName = "hangfire",
                         QueuePollInterval = TimeSpan.FromSeconds(15)
-                    }));
+                    });
+                }
+                else
+                {
+                    config.UsePostgreSqlStorage(options =>
+                        options.UseNpgsqlConnection(connectionString),
+                        new PostgreSqlStorageOptions
+                        {
+                            PrepareSchemaIfNecessary = true,
+                            SchemaName = "hangfire",
+                            QueuePollInterval = TimeSpan.FromSeconds(15)
+                        });
+                }
+            });
 
             services.AddHangfireServer();
 
@@ -326,6 +346,21 @@ namespace Kickify.Infrastructure
             services.AddHostedService<SystemLogBatchInsertService>();
 
             return services;
+        }
+    }
+
+    internal class HangfireNpgsqlDataSourceConnectionFactory : IConnectionFactory
+    {
+        private readonly NpgsqlDataSource _dataSource;
+
+        public HangfireNpgsqlDataSourceConnectionFactory(NpgsqlDataSource dataSource)
+        {
+            _dataSource = dataSource;
+        }
+
+        public NpgsqlConnection GetOrCreateConnection()
+        {
+            return _dataSource.CreateConnection();
         }
     }
 }
