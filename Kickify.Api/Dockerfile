@@ -1,8 +1,10 @@
 # Base Stage - Minimal Runtime
 FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS base
 
-# Install essential dependencies + curl for healthcheck
-RUN apk add --no-cache icu-libs tzdata curl \
+# Install essential dependencies + curl for healthcheck + AWS RDS Root CA
+RUN apk add --no-cache icu-libs tzdata curl ca-certificates \
+    && curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /usr/local/share/ca-certificates/aws-rds.crt \
+    && update-ca-certificates \
     && rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
 
 # Create non-root user

@@ -9,8 +9,6 @@ services:
       - "5000:8080"
     env_file:
       - /home/ubuntu/secrets/.env.production
-    volumes:
-      - /home/ubuntu/secrets/global-bundel.pem:/app/global-bundel.pem
     networks:
       - kickify-network
     healthcheck:
